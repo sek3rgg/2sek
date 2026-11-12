@@ -1,0 +1,822 @@
+--[[
+    Auto Spray Paint Quest (Thug / Tagger) - Ishin
+    - Ultra-Fast Dialogue (คุยรวดเร็วทันใจ ตอบตัวเลือกทันที)
+    - Under-Floor Stealth Spray (มุดใต้พื้นพ่น ป้องกันคนถ่ายคลิปรายงาน)
+    - Modern Dark Sleek UI (สไตล์การตั้งค่าพรีเมียมตามแบบ)
+    สร้างโดย Antigravity MCP
+]]
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local pgui = player:WaitForChild("PlayerGui")
+
+-- References
+local function getThug()
+    return Workspace:FindFirstChild("SprayPaintQuest", true)
+end
+
+local function getGraffitiFolder()
+    return Workspace:FindFirstChild("GraffitiParts", true)
+end
+
+local function getMuiPrompt()
+    return pgui:FindFirstChild("MultiOptionProximityPromptUI")
+end
+
+local function getDialogue()
+    return pgui:FindFirstChild("NPCDialogue", true)
+end
+
+local function getQuestContainer()
+    return pgui:FindFirstChild("QuestContainer", true)
+end
+
+-- Settings & States
+local running = false
+local loopEnabled = true
+local stealthSpray = true       -- มุดลงใต้พื้นตอนพ่น
+local stealthUnderDepth = 7     -- ระยะความลึกใต้พื้น (studs)
+local currentStep = "พร้อมทำงาน"
+local currentTab = "General"
+local logs = {}
+local completedCount = 0
+
+local function addLog(msg)
+    local t = os.date("%H:%M:%S")
+    table.insert(logs, 1, string.format("[%s] %s", t, msg))
+    if #logs > 40 then table.remove(logs) end
+end
+
+local function unsitPlayer()
+    local char = player.Character
+    local hum = char and char:FindFirstChild("Humanoid")
+    if hum and hum.Sit then
+        hum.Sit = false
+        hum.Jump = true
+        task.wait(0.05)
+    end
+end
+
+-- Noclip helper เพื่อให้ตัวละครมุดใต้พื้นได้โดยไม่เด้งขึ้นมา
+local noclipConn = nil
+local function setNoclip(enabled)
+    if enabled then
+        if not noclipConn then
+            noclipConn = RunService.Stepped:Connect(function()
+                local char = player.Character
+                if char then
+                    for _, part in ipairs(char:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            part.CanCollide = false
+                        end
+                    end
+                end
+            end)
+        end
+    else
+        if noclipConn then
+            noclipConn:Disconnect()
+            noclipConn = nil
+        end
+    end
+end
+
+local function equipSprayCan()
+    local char = player.Character
+    if not char then return false end
+    local hum = char:FindFirstChild("Humanoid")
+    if char:FindFirstChild("Spray Can") then return true end
+    local bp = player:FindFirstChild("Backpack")
+    local tool = bp and bp:FindFirstChild("Spray Can")
+    if tool and hum then
+        hum:EquipTool(tool)
+        task.wait(0.1)
+        return true
+    end
+    return false
+end
+
+-- หาผนังที่ NPC กำหนด (Indicator.Enabled == true)
+local function getDesignatedWalls()
+    local folder = getGraffitiFolder()
+    if not folder then return {} end
+    local list = {}
+    for _, wall in ipairs(folder:GetChildren()) do
+        local ind = wall:FindFirstChild("GraffitiIndicator")
+        if ind and ind.Enabled then
+            table.insert(list, wall)
+        end
+    end
+    return list
+end
+
+-- Fast Dialogue กับ NPC Thug
+local function talkToThugFast()
+    currentStep = "กำลังไปหา NPC Thug..."
+    addLog("วาร์ปไปคุยกับ Thug")
+    unsitPlayer()
+
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local thug = getThug()
+    if not root or not thug or not thug:FindFirstChild("HumanoidRootPart") then
+        addLog("❌ ไม่พบ NPC Thug")
+        return false
+    end
+
+    local thugHRP = thug.HumanoidRootPart
+    local thugTarget = thug:FindFirstChild("Head") or thugHRP
+
+    -- Teleport ยืนหน้า Thug
+    root.CFrame = thugHRP.CFrame * CFrame.new(0, 0, -3.2) * CFrame.Angles(0, math.rad(180), 0)
+
+    -- หันกล้องเล็งตรงไปที่ Thug
+    local camConn = RunService.RenderStepped:Connect(function()
+        local camera = workspace.CurrentCamera
+        if camera and root then
+            local camPos = root.Position + Vector3.new(0, 1.8, 0) + (root.CFrame.LookVector * -2.5)
+            camera.CFrame = CFrame.lookAt(camPos, thugTarget.Position)
+        end
+    end)
+
+    local dialogue = getDialogue()
+    local opened = dialogue and dialogue.Visible == true
+
+    -- กดปุ่ม Talk ทันที
+    if not opened then
+        for _ = 1, 30 do
+            if dialogue and dialogue.Visible then
+                opened = true
+                break
+            end
+            local mui = getMuiPrompt()
+            local btn = mui and mui:FindFirstChild("Button", true)
+            local lbl = btn and btn:FindFirstChild("Label")
+            if btn and lbl and lbl.Text == "Talk" then
+                for _, c in ipairs(getconnections(btn.Activated)) do
+                    c.Function()
+                end
+                opened = true
+                break
+            end
+            task.wait(0.03)
+        end
+    end
+
+    -- ขั้นตอนที่ 1: กด "Give me the can." อย่างรวดเร็ว
+    local bg = dialogue and dialogue:FindFirstChild("Background")
+    for _ = 1, 40 do
+        if dialogue and dialogue.Visible and bg then
+            local foundOpt = nil
+            for _, opt in ipairs(bg:GetChildren()) do
+                if opt:IsA("ImageButton") and opt.Name:find("DialogueOption") and opt.Visible then
+                    local optLbl = opt:FindFirstChild("DialogueLabel")
+                    if optLbl and optLbl.Text:lower():find("give me") then
+                        foundOpt = opt
+                        break
+                    end
+                end
+            end
+            if foundOpt then
+                for _, c in ipairs(getconnections(foundOpt.MouseButton1Click)) do
+                    c.Function()
+                end
+                addLog("กดรับสเปรย์ (Give me the can.)")
+                break
+            end
+        end
+        task.wait(0.03)
+    end
+
+    -- ขั้นตอนที่ 2: กด "Right." ปิดบทสนทนาและเริ่มเควสทันที
+    for _ = 1, 40 do
+        if not dialogue or not dialogue.Visible then break end
+        if bg then
+            local foundOpt = nil
+            for _, opt in ipairs(bg:GetChildren()) do
+                if opt:IsA("ImageButton") and opt.Name:find("DialogueOption") and opt.Visible then
+                    local optLbl = opt:FindFirstChild("DialogueLabel")
+                    if optLbl and (optLbl.Text:lower():find("right") or optLbl.Text:lower():find("sure") or optLbl.Text:lower():find("okay")) then
+                        foundOpt = opt
+                        break
+                    end
+                end
+            end
+            if foundOpt then
+                for _, c in ipairs(getconnections(foundOpt.MouseButton1Click)) do
+                    c.Function()
+                end
+                addLog("ยืนยันเริ่มเควส (Right.)")
+                break
+            end
+        end
+        task.wait(0.03)
+    end
+
+    camConn:Disconnect()
+    task.wait(0.15)
+    return true
+end
+
+-- พ่นผนัง 1 จุด (รองรับโหมดมุดใต้พื้น ป้องกันการโดนอัดคลิป)
+local function sprayWall(wall)
+    if not wall then return false end
+    unsitPlayer()
+    equipSprayCan()
+
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+
+    local decal = wall:FindFirstChild("Decal")
+    local normal = decal and wall.CFrame:VectorToWorldSpace(Vector3.FromNormalId(decal.Face)) or wall.CFrame.LookVector
+
+    -- คำนวณตำแหน่งพ่น: หากเปิด Stealth จะมุดลงไปใต้ดิน
+    local yOffset = stealthSpray and -stealthUnderDepth or 0
+    if stealthSpray then
+        setNoclip(true)
+    end
+
+    local success = false
+    -- ลองระยะต่างๆ
+    for _, dist in ipairs({2.5, 3.2, 1.8}) do
+        local standPos = wall.Position + (normal * dist) + Vector3.new(0, yOffset, 0)
+        root.CFrame = CFrame.lookAt(standPos, Vector3.new(wall.Position.X, standPos.Y, wall.Position.Z))
+
+        -- เล็งมุมกล้องขึ้นมาที่ตัวผนัง เพื่อให้ไอคอน [E] ติดแม้ตัวจะอยู่ใต้ดิน
+        local camConn = RunService.RenderStepped:Connect(function()
+            local camera = workspace.CurrentCamera
+            if camera and root then
+                local camPos = root.Position + Vector3.new(0, 1.5, 0) + (normal * 2.0)
+                camera.CFrame = CFrame.lookAt(camPos, wall.Position)
+            end
+        end)
+
+        task.wait(0.2)
+
+        for _ = 1, 20 do
+            local mui = getMuiPrompt()
+            local btn = mui and mui:FindFirstChild("Button", true)
+            local lbl = btn and btn:FindFirstChild("Label")
+            if mui and mui.Enabled and btn and lbl and lbl.Text == "Spray" then
+                for _, c in ipairs(getconnections(btn.Activated)) do
+                    c.Function()
+                end
+                success = true
+                break
+            end
+            task.wait(0.05)
+        end
+
+        camConn:Disconnect()
+        if success then break end
+    end
+
+    if stealthSpray then
+        setNoclip(false)
+    end
+
+    if success then
+        task.wait(0.4)
+    end
+    return success
+end
+
+-- Main Loop (รันต่อเนื่อง ไม่รอคูลดาวน์)
+local function mainWorkflow()
+    if running then return end
+    running = true
+
+    while running do
+        local hasCan = equipSprayCan()
+        local designated = getDesignatedWalls()
+
+        if not hasCan or #designated == 0 then
+            currentStep = "กำลังรับเควสจาก Thug..."
+            talkToThugFast()
+            task.wait(0.2)
+            hasCan = equipSprayCan()
+            designated = getDesignatedWalls()
+        end
+
+        if not running then break end
+
+        if #designated > 0 then
+            addLog(string.format("เริ่มพ่น %d จุด (Stealth: %s)", #designated, stealthSpray and "ใต้พื้น" or "บนพื้น"))
+            for idx, wall in ipairs(designated) do
+                if not running then break end
+                currentStep = string.format("กำลังพ่น [%d/%d] %s", idx, #designated, wall.Name)
+                addLog(string.format("-> ไปพ่น %s", wall.Name))
+
+                local sprayed = sprayWall(wall)
+                if sprayed then
+                    completedCount = completedCount + 1
+                    addLog(string.format("✅ พ่นสำเร็จ: %s", wall.Name))
+                else
+                    addLog(string.format("⚠️ พ่นไม่ติด: %s", wall.Name))
+                end
+                task.wait(0.15)
+            end
+        end
+
+        if not loopEnabled then
+            addLog("ทำงานครบ 1 รอบ (ปิด Auto-Loop)")
+            break
+        end
+
+        currentStep = "เตรียมรอบต่อไป..."
+        task.wait(0.3)
+    end
+
+    running = false
+    currentStep = "หยุดทำงานแล้ว"
+    addLog("ระบบหยุดการทำงาน")
+end
+
+-- ============================================================
+-- MODERN SLEEK DARK UI (สไตล์ตามภาพ)
+-- ============================================================
+local oldGui = pgui:FindFirstChild("ThugAutoSprayGui")
+if oldGui then oldGui:Destroy() end
+
+local sg = Instance.new("ScreenGui")
+sg.Name = "ThugAutoSprayGui"
+sg.ResetOnSpawn = false
+sg.DisplayOrder = 9999
+sg.Parent = pgui
+
+-- Main Container (Window)
+local win = Instance.new("Frame")
+win.Name = "MainWindow"
+win.Size = UDim2.new(0, 720, 0, 440)
+win.Position = UDim2.new(0.5, -360, 0.5, -220)
+win.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+win.BorderSizePixel = 0
+win.Active = true
+win.Parent = sg
+
+local winCorner = Instance.new("UICorner")
+winCorner.CornerRadius = UDim.new(0, 16)
+winCorner.Parent = win
+
+local winStroke = Instance.new("UIStroke")
+winStroke.Color = Color3.fromRGB(30, 30, 36)
+winStroke.Thickness = 1
+winStroke.Parent = win
+
+-- Draggable Window
+local isDragging, dragStart, startPos
+win.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        isDragging = true
+        dragStart = input.Position
+        startPos = win.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                isDragging = false
+            end
+        end)
+    end
+end)
+win.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement and isDragging then
+        local delta = input.Position - dragStart
+        win.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- Mac-style Traffic Light Window Controls (Top Left)
+local trafficLights = Instance.new("Frame")
+trafficLights.Size = UDim2.new(0, 70, 0, 30)
+trafficLights.Position = UDim2.new(0, 18, 0, 14)
+trafficLights.BackgroundTransparency = 1
+trafficLights.Parent = win
+
+local function makeDot(color, x)
+    local dot = Instance.new("TextButton")
+    dot.Text = ""
+    dot.Size = UDim2.new(0, 12, 0, 12)
+    dot.Position = UDim2.new(0, x, 0, 0)
+    dot.BackgroundColor3 = color
+    dot.BorderSizePixel = 0
+    dot.Parent = trafficLights
+    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+    return dot
+end
+
+local closeDot = makeDot(Color3.fromRGB(255, 95, 87), 0)    -- Red
+local minDot   = makeDot(Color3.fromRGB(254, 188, 46), 18)   -- Yellow
+local maxDot   = makeDot(Color3.fromRGB(40, 201, 64), 36)    -- Green
+
+closeDot.MouseButton1Click:Connect(function()
+    running = false
+    sg:Destroy()
+end)
+
+-- Top Right Header Info
+local topHeader = Instance.new("Frame")
+topHeader.Size = UDim2.new(0, 240, 0, 30)
+topHeader.Position = UDim2.new(1, -250, 0, 12)
+topHeader.BackgroundTransparency = 1
+topHeader.Parent = win
+
+local headerLayout = Instance.new("UIListLayout")
+headerLayout.FillDirection = Enum.FillDirection.Horizontal
+headerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+headerLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+headerLayout.Padding = UDim.new(0, 12)
+headerLayout.Parent = topHeader
+
+local brandLbl = Instance.new("TextLabel")
+brandLbl.Text = "🎨 Ishin Real v3.2"
+brandLbl.Font = Enum.Font.GothamBold
+brandLbl.TextSize = 13
+brandLbl.TextColor3 = Color3.fromRGB(240, 240, 245)
+brandLbl.BackgroundTransparency = 1
+brandLbl.Size = UDim2.new(0, 120, 1, 0)
+brandLbl.TextXAlignment = Enum.TextXAlignment.Right
+brandLbl.Parent = topHeader
+
+-- LEFT SIDEBAR
+local sidebar = Instance.new("Frame")
+sidebar.Size = UDim2.new(0, 200, 1, -50)
+sidebar.Position = UDim2.new(0, 0, 0, 50)
+sidebar.BackgroundTransparency = 1
+sidebar.Parent = win
+
+local sideTitle = Instance.new("TextLabel")
+sideTitle.Text = "Settings"
+sideTitle.Font = Enum.Font.GothamBold
+sideTitle.TextSize = 22
+sideTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+sideTitle.TextXAlignment = Enum.TextXAlignment.Left
+sideTitle.Size = UDim2.new(1, -36, 0, 30)
+sideTitle.Position = UDim2.new(0, 22, 0, 4)
+sideTitle.BackgroundTransparency = 1
+sideTitle.Parent = sidebar
+
+-- Search Box
+local searchBox = Instance.new("Frame")
+searchBox.Size = UDim2.new(1, -40, 0, 32)
+searchBox.Position = UDim2.new(0, 20, 0, 44)
+searchBox.BackgroundColor3 = Color3.fromRGB(22, 22, 26)
+searchBox.BorderSizePixel = 0
+searchBox.Parent = sidebar
+Instance.new("UICorner", searchBox).CornerRadius = UDim.new(0, 8)
+
+local searchLbl = Instance.new("TextLabel")
+searchLbl.Text = "🔍 Search..."
+searchLbl.Font = Enum.Font.Gotham
+searchLbl.TextSize = 12
+searchLbl.TextColor3 = Color3.fromRGB(110, 110, 125)
+searchLbl.Size = UDim2.new(1, -12, 1, 0)
+searchLbl.Position = UDim2.new(0, 10, 0, 0)
+searchLbl.TextXAlignment = Enum.TextXAlignment.Left
+searchLbl.BackgroundTransparency = 1
+searchLbl.Parent = searchBox
+
+-- Nav Items
+local navContainer = Instance.new("Frame")
+navContainer.Size = UDim2.new(1, -24, 1, -95)
+navContainer.Position = UDim2.new(0, 12, 0, 88)
+navContainer.BackgroundTransparency = 1
+navContainer.Parent = sidebar
+
+local navLayout = Instance.new("UIListLayout")
+navLayout.FillDirection = Enum.FillDirection.Vertical
+navLayout.Padding = UDim.new(0, 4)
+navLayout.Parent = navContainer
+
+local navButtons = {}
+local function createNavItem(name, icon, active)
+    local btn = Instance.new("TextButton")
+    btn.Text = ""
+    btn.Size = UDim2.new(1, 0, 0, 36)
+    btn.BackgroundColor3 = active and Color3.fromRGB(26, 26, 32) or Color3.fromRGB(12, 12, 14)
+    btn.BorderSizePixel = 0
+    btn.AutoButtonColor = false
+    btn.Parent = navContainer
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Text = icon .. "  " .. name
+    lbl.Font = active and Enum.Font.GothamBold or Enum.Font.Gotham
+    lbl.TextSize = 13
+    lbl.TextColor3 = active and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(150, 150, 165)
+    lbl.Size = UDim2.new(1, -16, 1, 0)
+    lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.BackgroundTransparency = 1
+    lbl.Parent = btn
+
+    navButtons[name] = {btn = btn, lbl = lbl}
+    return btn
+end
+
+local tabAutoSpray = createNavItem("Auto Spray", "🎨", true)
+local tabStealth   = createNavItem("Stealth (มุดดิน)", "🛡️", false)
+local tabLogs      = createNavItem("Console Logs", "⌨️", false)
+
+-- RIGHT CONTENT AREA
+local contentArea = Instance.new("Frame")
+contentArea.Size = UDim2.new(1, -225, 1, -65)
+contentArea.Position = UDim2.new(0, 215, 0, 50)
+contentArea.BackgroundTransparency = 1
+contentArea.Parent = win
+
+-- Tab Header Title
+local tabTitle = Instance.new("TextLabel")
+tabTitle.Text = "Auto Spray Settings"
+tabTitle.Font = Enum.Font.GothamBold
+tabTitle.TextSize = 22
+tabTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+tabTitle.TextXAlignment = Enum.TextXAlignment.Left
+tabTitle.Size = UDim2.new(1, 0, 0, 32)
+tabTitle.BackgroundTransparency = 1
+tabTitle.Parent = contentArea
+
+local tabSub = Instance.new("TextLabel")
+tabSub.Text = "CONFIGURATION"
+tabSub.Font = Enum.Font.GothamBold
+tabSub.TextSize = 10
+tabSub.TextColor3 = Color3.fromRGB(110, 110, 125)
+tabSub.TextXAlignment = Enum.TextXAlignment.Left
+tabSub.Size = UDim2.new(1, 0, 0, 18)
+tabSub.Position = UDim2.new(0, 0, 0, 32)
+tabSub.BackgroundTransparency = 1
+tabSub.Parent = contentArea
+
+-- Content Scroll Frame
+local scrollContent = Instance.new("ScrollingFrame")
+scrollContent.Size = UDim2.new(1, -10, 1, -55)
+scrollContent.Position = UDim2.new(0, 0, 0, 55)
+scrollContent.BackgroundTransparency = 1
+scrollContent.ScrollBarThickness = 3
+scrollContent.ScrollBarImageColor3 = Color3.fromRGB(45, 45, 55)
+scrollContent.CanvasSize = UDim2.new(1, 0, 0, 0)
+scrollContent.Parent = contentArea
+
+local cLayout = Instance.new("UIListLayout")
+cLayout.FillDirection = Enum.FillDirection.Vertical
+cLayout.Padding = UDim.new(0, 10)
+cLayout.Parent = scrollContent
+
+-- Helper: สร้าง Card แถวการตั้งค่าตามดีไซน์ในภาพ
+local function createSettingRow(title, desc, icon, defaultState, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -8, 0, 60)
+    row.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+    row.BorderSizePixel = 0
+    row.Parent = scrollContent
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 10)
+
+    -- Icon
+    local ic = Instance.new("TextLabel")
+    ic.Text = icon
+    ic.Font = Enum.Font.Gotham
+    ic.TextSize = 16
+    ic.Size = UDim2.new(0, 30, 0, 30)
+    ic.Position = UDim2.new(0, 12, 0.5, -15)
+    ic.BackgroundTransparency = 1
+    ic.Parent = row
+
+    -- Title
+    local tLbl = Instance.new("TextLabel")
+    tLbl.Text = title
+    tLbl.Font = Enum.Font.GothamBold
+    tLbl.TextSize = 13
+    tLbl.TextColor3 = Color3.fromRGB(240, 240, 245)
+    tLbl.TextXAlignment = Enum.TextXAlignment.Left
+    tLbl.Size = UDim2.new(0.65, 0, 0, 18)
+    tLbl.Position = UDim2.new(0, 48, 0, 12)
+    tLbl.BackgroundTransparency = 1
+    tLbl.Parent = row
+
+    -- Description
+    local dLbl = Instance.new("TextLabel")
+    dLbl.Text = desc
+    dLbl.Font = Enum.Font.Gotham
+    dLbl.TextSize = 11
+    dLbl.TextColor3 = Color3.fromRGB(130, 130, 145)
+    dLbl.TextXAlignment = Enum.TextXAlignment.Left
+    dLbl.Size = UDim2.new(0.65, 0, 0, 16)
+    dLbl.Position = UDim2.new(0, 48, 0, 32)
+    dLbl.BackgroundTransparency = 1
+    dLbl.Parent = row
+
+    -- Toggle Switch (Sleek Green / Grey)
+    local togBg = Instance.new("Frame")
+    togBg.Size = UDim2.new(0, 44, 0, 24)
+    togBg.Position = UDim2.new(1, -56, 0.5, -12)
+    togBg.BackgroundColor3 = defaultState and Color3.fromRGB(35, 195, 125) or Color3.fromRGB(40, 40, 48)
+    togBg.BorderSizePixel = 0
+    togBg.Parent = row
+    Instance.new("UICorner", togBg).CornerRadius = UDim.new(1, 0)
+
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.new(0, 18, 0, 18)
+    dot.Position = UDim2.new(0, defaultState and 23 or 3, 0.5, -9)
+    dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    dot.BorderSizePixel = 0
+    dot.Parent = togBg
+    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+    local state = defaultState
+    local btn = Instance.new("TextButton")
+    btn.Text = ""
+    btn.Size = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.Parent = togBg
+
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        TweenService:Create(togBg, TweenInfo.new(0.2), {
+            BackgroundColor3 = state and Color3.fromRGB(35, 195, 125) or Color3.fromRGB(40, 40, 48)
+        }):Play()
+        TweenService:Create(dot, TweenInfo.new(0.2), {
+            Position = UDim2.new(0, state and 23 or 3, 0.5, -9)
+        }):Play()
+        if callback then callback(state) end
+    end)
+
+    return row
+end
+
+-- สร้างการตั้งค่าแถวต่างๆ
+createSettingRow(
+    "Stealth Under-Floor Mode",
+    "มุดตัวละครลงใต้พื้นขณะพ่น ป้องกันคนถ่ายคลิปไปแจ้งแบน",
+    "🛡️",
+    stealthSpray,
+    function(s) stealthSpray = s end
+)
+
+createSettingRow(
+    "Continuous Auto Loop",
+    "วนลูปเควสเรื่อยๆ ไม่มีคูลดาวน์ เมื่อพ่นครบไปคุยรับรอบใหม่ทันที",
+    "🔁",
+    loopEnabled,
+    function(s) loopEnabled = s end
+)
+
+-- Status Info Card
+local statusRow = Instance.new("Frame")
+statusRow.Size = UDim2.new(1, -8, 0, 54)
+statusRow.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+statusRow.BorderSizePixel = 0
+statusRow.Parent = scrollContent
+Instance.new("UICorner", statusRow).CornerRadius = UDim.new(0, 10)
+
+local stIcon = Instance.new("TextLabel")
+stIcon.Text = "⚡"
+stIcon.Size = UDim2.new(0, 30, 0, 30)
+stIcon.Position = UDim2.new(0, 12, 0.5, -15)
+stIcon.BackgroundTransparency = 1
+stIcon.Parent = statusRow
+
+local statusLbl = Instance.new("TextLabel")
+statusLbl.Text = "สถานะ: พร้อมทำงาน"
+statusLbl.Font = Enum.Font.GothamBold
+statusLbl.TextSize = 13
+statusLbl.TextColor3 = Color3.fromRGB(90, 225, 140)
+statusLbl.TextXAlignment = Enum.TextXAlignment.Left
+statusLbl.Size = UDim2.new(0.5, 0, 1, 0)
+statusLbl.Position = UDim2.new(0, 48, 0, 0)
+statusLbl.BackgroundTransparency = 1
+statusLbl.Parent = statusRow
+
+local questProgressLbl = Instance.new("TextLabel")
+questProgressLbl.Text = "เควส: 0/4"
+questProgressLbl.Font = Enum.Font.GothamBold
+questProgressLbl.TextSize = 13
+questProgressLbl.TextColor3 = Color3.fromRGB(255, 205, 80)
+questProgressLbl.TextXAlignment = Enum.TextXAlignment.Right
+questProgressLbl.Size = UDim2.new(0.4, 0, 1, 0)
+questProgressLbl.Position = UDim2.new(0.58, 0, 0, 0)
+questProgressLbl.BackgroundTransparency = 1
+questProgressLbl.Parent = statusRow
+
+-- Action Buttons Bar (ด้านล่าง)
+local actionRow = Instance.new("Frame")
+actionRow.Size = UDim2.new(1, -8, 0, 44)
+actionRow.BackgroundTransparency = 1
+actionRow.Parent = scrollContent
+
+local aLayout = Instance.new("UIListLayout")
+aLayout.FillDirection = Enum.FillDirection.Horizontal
+aLayout.Padding = UDim.new(0, 10)
+aLayout.Parent = actionRow
+
+local function makeActionBtn(txt, bgCol, widthScale)
+    local b = Instance.new("TextButton")
+    b.Text = txt
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 12
+    b.TextColor3 = Color3.fromRGB(255, 255, 255)
+    b.BackgroundColor3 = bgCol
+    b.Size = UDim2.new(widthScale, -5, 1, 0)
+    b.BorderSizePixel = 0
+    b.AutoButtonColor = false
+    b.Parent = actionRow
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+    return b
+end
+
+local startBtn = makeActionBtn("▶ เริ่มพ่นอัตโนมัติ", Color3.fromRGB(35, 195, 125), 0.5)
+local stopBtn  = makeActionBtn("⏹ หยุด", Color3.fromRGB(220, 55, 65), 0.25)
+local talkBtn  = makeActionBtn("💬 คุย Thug", Color3.fromRGB(45, 110, 220), 0.25)
+
+-- Console Logs Container
+local logSection = Instance.new("Frame")
+logSection.Size = UDim2.new(1, -8, 0, 130)
+logSection.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+logSection.BorderSizePixel = 0
+logSection.Parent = scrollContent
+Instance.new("UICorner", logSection).CornerRadius = UDim.new(0, 10)
+
+local lStroke = Instance.new("UIStroke")
+lStroke.Color = Color3.fromRGB(30, 30, 36)
+lStroke.Thickness = 1
+lStroke.Parent = logSection
+
+local logScroll = Instance.new("ScrollingFrame")
+logScroll.Size = UDim2.new(1, -16, 1, -12)
+logScroll.Position = UDim2.new(0, 8, 0, 6)
+logScroll.BackgroundTransparency = 1
+logScroll.ScrollBarThickness = 2
+logScroll.ScrollBarImageColor3 = Color3.fromRGB(60, 60, 75)
+logScroll.Parent = logSection
+
+local logLayout = Instance.new("UIListLayout")
+logLayout.Padding = UDim.new(0, 3)
+logLayout.Parent = logScroll
+
+local logLabels = {}
+for i = 1, 10 do
+    local l = Instance.new("TextLabel")
+    l.Text = ""
+    l.Size = UDim2.new(1, 0, 0, 13)
+    l.Font = Enum.Font.Code
+    l.TextSize = 10
+    l.TextColor3 = Color3.fromRGB(130, 205, 145)
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.BackgroundTransparency = 1
+    l.Parent = logScroll
+    table.insert(logLabels, l)
+end
+
+scrollContent.CanvasSize = UDim2.new(0, 0, 0, cLayout.AbsoluteContentSize.Y + 15)
+
+-- Button Bindings
+startBtn.MouseButton1Click:Connect(function()
+    if running then return end
+    addLog("กดเริ่มพ่นอัตโนมัติ")
+    task.spawn(mainWorkflow)
+end)
+
+stopBtn.MouseButton1Click:Connect(function()
+    running = false
+    setNoclip(false)
+    currentStep = "หยุดทำงานแล้ว"
+    addLog("กดหยุดทำงาน")
+end)
+
+talkBtn.MouseButton1Click:Connect(function()
+    if running then return end
+    addLog("กดไปคุยกับ Thug")
+    task.spawn(function()
+        talkToThugFast()
+        currentStep = "คุยเสร็จแล้ว"
+    end)
+end)
+
+-- Heartbeat Live Update
+RunService.Heartbeat:Connect(function()
+    statusLbl.Text = (running and "⚡ กำลังทำงาน: " or "⏸ สถานะ: ") .. currentStep
+
+    local qc = getQuestContainer()
+    local pLbl = qc and qc:FindFirstChild("ProgressLabel", true)
+    local designated = getDesignatedWalls()
+    if pLbl and qc.Visible and pLbl.Text ~= "" then
+        questProgressLbl.Text = string.format("เควส: %s (คงเหลือ %d จุด)", pLbl.Text, #designated)
+    else
+        questProgressLbl.Text = string.format("จุดที่กำหนด: %d จุด", #designated)
+    end
+
+    for i, lbl in ipairs(logLabels) do
+        lbl.Text = logs[i] or ""
+    end
+    logScroll.CanvasSize = UDim2.new(0, 0, 0, logLayout.AbsoluteContentSize.Y)
+    scrollContent.CanvasSize = UDim2.new(0, 0, 0, cLayout.AbsoluteContentSize.Y + 20)
+end)
+
+addLog("ระบบ Ishin Stealth Auto Spray โหลดสำเร็จ")
+print("[IshinReal] UI โหลดสำเร็จ!")
